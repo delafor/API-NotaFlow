@@ -14,7 +14,10 @@ def valor_monetario(texto: str):
         return None
 
     texto = texto.strip()
-    texto = texto.replace(".", "").replace(",", ".")
+    if "," in texto and "." in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    elif "," in texto:
+        texto = texto.replace(",", ".")
 
     try:
         return float(texto)
@@ -329,7 +332,7 @@ def extrair_nfce(soup: BeautifulSoup):
     # ==========================================================
 
     for item in soup.select("#tabResult tr"):
-        nome_elemento = item.select_one(".txtTit")
+        nome_elemento = item.select_one(".txtTit") or item.select_one(".txtTit2")
 
         if not nome_elemento:
             continue
@@ -344,59 +347,100 @@ def extrair_nfce(soup: BeautifulSoup):
         valor_unitario = None
         valor_total = None
 
+        texto_linha = limpar_texto(item.get_text(" ", strip=True))
+
         # Código
         elemento = item.select_one(".RCod")
 
         if elemento:
             match = re.search(
-                r"Código:\s*(\d+)",
+                r"C[oó]digo\s*:?\s*(\d+)",
                 elemento.get_text(),
+                re.IGNORECASE,
             )
 
             if match:
                 codigo = match.group(1)
 
-        # Quantidade
-        elemento = item.select_one("qtd")
+        # Quantidade (suporta .Rqtd, Qtde.:, Qtd.:, etc.)
+        elemento = item.select_one(".Rqtd") or item.select_one("qtd")
 
         if elemento:
+            texto_qtd = limpar_texto(elemento.get_text())
             match = re.search(
-                r"Qtde\.\s*([\d,.]+)",
-                elemento.get_text(),
+                r"(?:Qtde|Qtd)\.?\s*:?\s*([\d.,]+)",
+                texto_qtd,
+                re.IGNORECASE,
             )
+            if not match:
+                match = re.search(r"([\d.,]+)", texto_qtd)
 
             if match:
                 quantidade = valor_monetario(
                     match.group(1)
                 )
+        else:
+            match = re.search(
+                r"(?:Qtde|Qtd)\.?\s*:?\s*([\d.,]+)",
+                texto_linha,
+                re.IGNORECASE,
+            )
+            if match:
+                quantidade = valor_monetario(match.group(1))
 
-        # Unidade
+        # Unidade (UN, KG, L, PC, etc.)
         elemento = item.select_one(".RUN")
 
         if elemento:
+            texto_un = limpar_texto(elemento.get_text())
             match = re.search(
-                r"UN:\s*(.*)",
-                elemento.get_text(),
+                r"UN\.?\s*:?\s*([A-Za-z0-9]+)",
+                texto_un,
+                re.IGNORECASE,
             )
 
             if match:
                 unidade = limpar_texto(
                     match.group(1)
-                )
+                ).upper()
+            else:
+                limpo = re.sub(r"^UN\.?\s*:?\s*", "", texto_un, flags=re.IGNORECASE).strip()
+                if limpo:
+                    unidade = limpo.upper()
+        else:
+            match = re.search(
+                r"\bUN\.?\s*:?\s*([A-Za-z0-9]+)",
+                texto_linha,
+                re.IGNORECASE,
+            )
+            if match:
+                unidade = match.group(1).strip().upper()
 
-        # Valor unitário
+        # Valor unitário (preço por UN ou preço do KG na nota)
         elemento = item.select_one(".RvlUnit")
 
         if elemento:
+            texto_unit = limpar_texto(elemento.get_text())
             match = re.search(
-                r"Vl\. Unit\.\s*([\d,.]+)",
-                elemento.get_text(),
+                r"Vl(?:r)?\.?\s*Unit\.?\s*:?\s*(?:R\$\s*)?([\d.,]+)",
+                texto_unit,
+                re.IGNORECASE,
             )
+            if not match:
+                match = re.search(r"([\d.,]+)", texto_unit)
 
             if match:
                 valor_unitario = valor_monetario(
                     match.group(1)
                 )
+        else:
+            match = re.search(
+                r"Vl(?:r)?\.?\s*Unit\.?\s*:?\s*(?:R\$\s*)?([\d.,]+)",
+                texto_linha,
+                re.IGNORECASE,
+            )
+            if match:
+                valor_unitario = valor_monetario(match.group(1))
 
         # Valor total
         elemento = item.select_one(".valor")
@@ -406,6 +450,22 @@ def extrair_nfce(soup: BeautifulSoup):
                 elemento.get_text()
             )
 
+        # Fallbacks matemáticos caso algum campo venha omitido na nota
+        if valor_unitario is None and valor_total is not None and quantidade and quantidade > 0:
+            valor_unitario = round(valor_total / quantidade, 2)
+
+        if valor_total is None and valor_unitario is not None and quantidade is not None:
+            valor_total = round(valor_unitario * quantidade, 2)
+
+        if not unidade:
+            unidade = "UN"
+
+        eh_kg = unidade in ("KG", "KILO", "QUILO", "KG.")
+        if eh_kg:
+            unidade = "KG"
+
+        preco_kg = valor_unitario if eh_kg else None
+
         produtos.append(
             {
                 "nome": nome,
@@ -413,6 +473,7 @@ def extrair_nfce(soup: BeautifulSoup):
                 "quantidade": quantidade,
                 "unidade": unidade,
                 "valor_unitario": valor_unitario,
+                "preco_kg": preco_kg,
                 "valor_total": valor_total,
             }
         )
@@ -440,9 +501,49 @@ def extrair_nfce(soup: BeautifulSoup):
                 match.group(1)
             )
 
+    # ==========================================================
+    # IDENTIFICAÇÃO DA NFC-e E CHAVE DE ACESSO
+    # ==========================================================
+    numero = None
+    serie = None
+    emissao = None
+    chave = None
+
+    for info in soup.select("#infos li, #infos div"):
+        texto_info = limpar_texto(info.get_text(" ", strip=True))
+
+        if not numero:
+            match = re.search(r"Número:\s*(\d+)", texto_info, re.IGNORECASE)
+            if match:
+                numero = match.group(1)
+
+        if not serie:
+            match = re.search(r"Série:\s*(\d+)", texto_info, re.IGNORECASE)
+            if match:
+                serie = match.group(1)
+
+        if not emissao:
+            match = re.search(r"Emissão:\s*(\d{2}/\d{2}/\d{4}(?:\s*-\s*|\s+)[0-9:]+)", texto_info, re.IGNORECASE)
+            if match:
+                emissao = match.group(1)
+
+    elemento_chave = soup.select_one(".chave")
+    if elemento_chave:
+        chave = re.sub(r"\D", "", elemento_chave.get_text())
+    else:
+        # Tenta encontrar no texto geral
+        texto_geral = soup.get_text(" ", strip=True)
+        match_chave = re.search(r"Chave de acesso:\s*([\d\s.]{44,60})", texto_geral, re.IGNORECASE)
+        if match_chave:
+            chave = re.sub(r"\D", "", match_chave.group(1))
+
     return {
         "tipo": "NFC-e",
         "estabelecimento": estabelecimento,
         "produtos": produtos,
         "total": total,
+        "numero": numero,
+        "serie": serie,
+        "emissao": emissao,
+        "chave": chave,
     }

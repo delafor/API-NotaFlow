@@ -11,6 +11,7 @@ from auth import get_current_user_uid
 from firebase import db
 from extractor import extrair_nota
 from parser import buscar_pagina
+from schemas import NotaFiscalSchema, gerar_id_deterministico_nota
 from security import rate_limiter, validate_url
 
 # ------------------------------------------------------------
@@ -48,7 +49,7 @@ app.add_middleware(
 
 
 # ------------------------------------------------------------
-# PYDANTIC SCHEMAS
+# PYDANTIC SCHEMAS DE ENTRADA
 # ------------------------------------------------------------
 class NotaRequest(BaseModel):
     url: str = Field(
@@ -96,6 +97,7 @@ def _obter_documento_nota(uid: str, nota_id: str):
     """
     Recupera com segurança o documento da nota no escopo do usuário autenticado:
     usuarios/{uid}/notas/{nota_id}
+    Garante que o UID nunca seja alterado ou acessado por terceiros.
     """
     doc_ref = (
         db.collection("usuarios")
@@ -152,6 +154,7 @@ def extrair_dados_nota(
 ):
     """
     Executa a extração dos dados fiscais de uma nota já salva na conta do usuário autenticado.
+    Utiliza transação nativa do Firestore para garantir atomicidade, idempotência e integridade.
     """
     # Rate Limiting
     client_ip = request.client.host if request.client else "unknown"
@@ -169,6 +172,20 @@ def extrair_dados_nota(
             detail="Nota não encontrada",
         )
 
+    # Idempotência: Se já foi extraída com sucesso E contém produtos com valor_unitario, retorna os dados existentes
+    prods = dados.get("dadosExtraidos", {}).get("produtos", [])
+    tem_prods_sem_unitario = any(p.get("valor_unitario") is None for p in prods) if prods else False
+
+    if dados.get("status") == "extraida" and dados.get("dadosExtraidos") and not tem_prods_sem_unitario:
+        logger.info(f"Nota {nota_id} já extraída previamente com sucesso. Retornando dados em cache.")
+        return {
+            "sucesso": True,
+            "id": nota_id,
+            "url": dados.get("linkNota"),
+            "nota": dados.get("dadosExtraidos"),
+            "idempotente": True,
+        }
+
     url = dados.get("linkNota")
     if not url:
         raise HTTPException(
@@ -180,21 +197,44 @@ def extrair_dados_nota(
 
     try:
         html = buscar_pagina(url)
-        nota = extrair_nota(html)
+        dados_brutos = extrair_nota(html)
 
-        doc_ref.update({
-            "dadosExtraidos": nota,
-            "status": "extraida",
-        })
+        # Validação estrita com Pydantic antes de qualquer persistência
+        # Impede salvar dados incompletos ou corrompidos
+        nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
+
+        # Transação nativa do Firestore para atualização atômica e consistente
+        transaction = db.transaction()
+
+        from google.cloud.firestore import Transaction
+
+        @db.transaction()
+        def _atualizar_transacao(trans: Transaction):
+            snapshot = doc_ref.get(transaction=trans)
+            if not snapshot.exists:
+                raise HTTPException(status_code=404, detail="Nota não encontrada.")
+
+            trans.update(doc_ref, {
+                "dadosExtraidos": nota_validada,
+                "status": "extraida",
+                "tipo": nota_validada.get("tipo"),
+                "total": nota_validada.get("total"),
+                "chave": nota_validada.get("chave"),
+                "owner_uid": uid,  # Garante que o UID de propriedade seja preservado
+            })
+
+        _atualizar_transacao(transaction)
 
         return {
             "sucesso": True,
             "id": nota_id,
             "url": url,
-            "nota": nota,
+            "nota": nota_validada,
         }
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Erro ao extrair nota {nota_id}: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -211,7 +251,7 @@ def importar_nota(
 ):
     """
     Importa e extrai em tempo real os dados de uma nota fiscal a partir de sua URL/QR Code.
-    Exige autenticação Firebase Auth.
+    Utiliza identificadores determinísticos para evitar notas duplicadas e transação nativa do Firestore.
     """
     # Rate Limiting
     client_ip = request.client.host if request.client else "unknown"
@@ -226,26 +266,64 @@ def importar_nota(
 
     try:
         html = buscar_pagina(url)
+        dados_brutos = extrair_nota(html)
 
-        # Opcional: salvar HTML para debug apenas se explicitamente habilitado no .env
-        save_debug = os.getenv("SAVE_DEBUG_HTML", "false").lower() == "true"
-        if save_debug:
-            try:
-                with open("bpe.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-            except Exception as fe:
-                logger.warning(f"Não foi possível salvar bpe.html para debug: {str(fe)}")
+        # Validação estrita de campos, totais e produtos com Pydantic
+        # Se a extração falhar ou tiver campos obrigatórios ausentes, gera exceção e NÃO salva
+        nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
 
-        nota = extrair_nota(html)
+        # Identificador determinístico da nota fiscal (chave fiscal / hash determinístico)
+        nota_id = gerar_id_deterministico_nota(nota_validada, url_origem=url)
+
+        doc_ref = (
+            db.collection("usuarios")
+            .document(uid)
+            .collection("notas")
+            .document(nota_id)
+        )
+
+        from google.cloud.firestore import Transaction
+
+        transaction = db.transaction()
+
+        @db.transaction()
+        def _salvar_transacao(trans: Transaction):
+            snapshot = doc_ref.get(transaction=trans)
+            if snapshot.exists:
+                snap_dados = snapshot.to_dict() or {}
+                prods_existentes = snap_dados.get("dadosExtraidos", {}).get("produtos", [])
+                tem_sem_unitario = any(p.get("valor_unitario") is None for p in prods_existentes) if prods_existentes else False
+                if not tem_sem_unitario:
+                    logger.info(f"Nota já existe para o usuário {uid} com ID {nota_id}. Operação idempotente.")
+                    return snap_dados, True
+
+            dados_salvar = {
+                "id": nota_id,
+                "owner_uid": uid,
+                "linkNota": url,
+                "status": "extraida",
+                "dadosExtraidos": nota_validada,
+                "tipo": nota_validada.get("tipo"),
+                "total": nota_validada.get("total"),
+                "chave": nota_validada.get("chave"),
+            }
+            trans.set(doc_ref, dados_salvar)
+            return dados_salvar, False
+
+        doc_dados, ja_existia = _salvar_transacao(transaction)
 
         return {
             "sucesso": True,
+            "id": nota_id,
             "url": url,
-            "nota": nota,
+            "nota": nota_validada,
+            "idempotente": ja_existia,
         }
 
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Erro ao importar nota via URL: {str(e)}", exc_info=True)
         raise HTTPException(

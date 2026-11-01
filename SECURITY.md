@@ -22,5 +22,24 @@
 - **Sem Exposição de Stack Traces**: Erros internos são capturados globalmente. O cliente HTTP recebe mensagens genéricas sanitizadas sem vazamento de detalhes de infraestrutura ou banco de dados.
 - **Logs Estruturados**: Utilização do módulo padrão `logging` em formato estruturado sem impressão em texto limpo de PII (dados pessoais/fiscais).
 
-### 5. Gestão de Credenciais
-- O arquivo `firebase-service-account.json` e chaves privadas estão estritamente incluídos no `.gitignore`.
+### 5. Gestão de Credenciais e Segurança no GitHub
+- Os arquivos `firebase-service-account.json`, `*-firebase-adminsdk-*.json`, `.env` e quaisquer certificados/chaves estão estritamente incluídos no `.gitignore`.
+- Nunca commite chaves de conta de serviço no repositório. Em ambientes como Render, Fly.io, Railway ou Cloud Run, armazene as credenciais como variável de ambiente (secret) codificada ou monte o arquivo com permissão restrita.
+
+### 6. Regras de Segurança do Firestore (`firestore.rules`)
+- As requisições diretas do Flutter/clientes ao Firestore devem seguir o princípio de isolamento estrito:
+  - Documentos em `/usuarios/{userId}` e subcoleções `/usuarios/{userId}/notas/{notaId}` são restritos exclusivamente a `request.auth.uid == userId`.
+  - Nenhuma leitura ou escrita global em `/notas` é permitida.
+  - O arquivo `firestore.rules` foi adicionado à raiz do repositório para implantação no console Firebase (`firebase deploy --only firestore:rules`).
+
+### 7. Permissões IAM da Conta de Serviço (Princípio do Menor Privilégio)
+- A conta de serviço utilizada pela API deve possuir apenas os privilégios mínimos necessários:
+  - **Papel Recomendado**: `Cloud Datastore User` (ou `roles/datastore.user`) para ler e gravar documentos no Firestore.
+  - **Firebase Authentication**: A verificação de ID Tokens (`firebase_admin.auth.verify_id_token`) é feita via validação de assinatura de chave pública local e cacheada, **não** necessitando de papéis de escrita ou administração de usuários no IAM.
+  - **Evitar**: Não atribua permissões como `Firebase Admin`, `Editor` ou `Owner` à conta de serviço em produção.
+
+### 8. HTTPS e Proteção de Tráfego em Produção
+- O Uvicorn roda atrás de um proxy reverso (Nginx, Traefik, Caddy, Cloudflare ou o roteador gerenciado da nuvem).
+- Toda comunicação com o aplicativo Flutter deve ocorrer obrigatoriamente através de **HTTPS** (TLS 1.2+ / TLS 1.3).
+- Utilize cabeçalhos `Strict-Transport-Security` (HSTS) no proxy reverso para impedir *downgrade attacks*.
+

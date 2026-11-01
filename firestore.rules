@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Regra padrão: nega tudo que não for explicitamente permitido
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Isolamento por Usuário: Cada usuário acessa estritamente seus próprios dados
+    match /usuarios/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // Subcoleção de notas fiscais pertencentes ao usuário
+      match /notas/{notaId} {
+        // Leitura (get e list) permitida somente se o usuário autenticado for o dono do documento
+        allow read: if request.auth != null && request.auth.uid == userId;
+
+        // Criação e Atualização permitidas somente pelo dono com validação básica de campos
+        allow create, update: if request.auth != null 
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasAll(['linkNota'])
+          && request.resource.data.linkNota is string
+          && request.resource.data.linkNota.size() <= 2048;
+
+        // Exclusão permitida somente pelo dono
+        allow delete: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+  }
+}
+
