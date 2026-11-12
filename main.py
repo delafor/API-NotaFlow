@@ -261,27 +261,18 @@ def extrair_dados_nota(
         # Impede salvar dados incompletos ou corrompidos
         nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
 
-        # Transação nativa do Firestore para atualização atômica e consistente
-        from google.cloud.firestore import Transaction, transactional
+        snapshot = doc_ref.get()
+        if not snapshot.exists:
+            raise HTTPException(status_code=404, detail="Nota não encontrada.")
 
-        transaction = db.transaction()
-
-        @transactional
-        def _atualizar_transacao(trans: Transaction):
-            snapshot = doc_ref.get(transaction=trans)
-            if not snapshot.exists:
-                raise HTTPException(status_code=404, detail="Nota não encontrada.")
-
-            trans.update(doc_ref, {
-                "dadosExtraidos": nota_validada,
-                "status": "extraida",
-                "tipo": nota_validada.get("tipo"),
-                "total": nota_validada.get("total"),
-                "chave": nota_validada.get("chave"),
-                "owner_uid": uid,  # Garante que o UID de propriedade seja preservado
-            })
-
-        _atualizar_transacao(transaction)
+        doc_ref.update({
+            "dadosExtraidos": nota_validada,
+            "status": "extraida",
+            "tipo": nota_validada.get("tipo"),
+            "total": nota_validada.get("total"),
+            "chave": nota_validada.get("chave"),
+            "owner_uid": uid,  # Garante que o UID de propriedade seja preservado
+        })
         background_tasks.add_task(_publicar_colaborativo_em_background, uid, nota_id, nota_validada)
 
         return {
@@ -342,21 +333,29 @@ def importar_nota(
             .document(nota_id)
         )
 
-        from google.cloud.firestore import Transaction, transactional
-
-        transaction = db.transaction()
-
-        @transactional
-        def _salvar_transacao(trans: Transaction):
-            snapshot = doc_ref.get(transaction=trans)
-            if snapshot.exists:
-                snap_dados = snapshot.to_dict() or {}
-                prods_existentes = snap_dados.get("dadosExtraidos", {}).get("produtos", [])
-                tem_sem_unitario = any(p.get("valor_unitario") is None for p in prods_existentes) if prods_existentes else False
-                if not tem_sem_unitario:
-                    logger.info(f"Nota já existe para o usuário {uid} com ID {nota_id}. Operação idempotente.")
-                    return snap_dados, True
-
+        snapshot = doc_ref.get()
+        ja_existia = False
+        if snapshot.exists:
+            snap_dados = snapshot.to_dict() or {}
+            prods_existentes = snap_dados.get("dadosExtraidos", {}).get("produtos", [])
+            tem_sem_unitario = any(p.get("valor_unitario") is None for p in prods_existentes) if prods_existentes else False
+            if not tem_sem_unitario:
+                logger.info(f"Nota já existe para o usuário {uid} com ID {nota_id}. Operação idempotente.")
+                ja_existia = True
+                dados_salvar = snap_dados
+            else:
+                dados_salvar = {
+                    "id": nota_id,
+                    "owner_uid": uid,
+                    "linkNota": url,
+                    "status": "extraida",
+                    "dadosExtraidos": nota_validada,
+                    "tipo": nota_validada.get("tipo"),
+                    "total": nota_validada.get("total"),
+                    "chave": nota_validada.get("chave"),
+                }
+                doc_ref.set(dados_salvar)
+        else:
             dados_salvar = {
                 "id": nota_id,
                 "owner_uid": uid,
@@ -367,10 +366,8 @@ def importar_nota(
                 "total": nota_validada.get("total"),
                 "chave": nota_validada.get("chave"),
             }
-            trans.set(doc_ref, dados_salvar)
-            return dados_salvar, False
+            doc_ref.set(dados_salvar)
 
-        doc_dados, ja_existia = _salvar_transacao(transaction)
         background_tasks.add_task(_publicar_colaborativo_em_background, uid, nota_id, nota_validada)
 
         return {

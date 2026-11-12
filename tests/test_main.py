@@ -88,8 +88,7 @@ def test_importar_nota_com_transacao_sucesso():
 
     try:
         with patch("main.buscar_pagina", return_value=html_sample), \
-             patch("main.db.collection") as mock_col, \
-             patch("main.db.transaction", return_value=mock_trans):
+             patch("main.db.collection") as mock_col:
 
             mock_col.return_value.document.return_value.collection.return_value.document.return_value = mock_doc_ref
 
@@ -103,7 +102,7 @@ def test_importar_nota_com_transacao_sucesso():
             assert dados["sucesso"] is True
             assert dados["nota"]["total"] == 15.0
             assert len(dados["nota"]["produtos"]) == 1
-            mock_trans.set.assert_called_once()
+            mock_doc_ref.set.assert_called_once()
     finally:
         app.dependency_overrides.pop(get_current_user_uid, None)
 
