@@ -190,7 +190,9 @@ def safe_http_request(
     timeout = (connect_timeout, read_timeout)
 
     http_session = session or _SHARED_HTTP_SESSION
-    current_url = url
+    if session is None:
+        http_session.cookies.clear()
+    current_url = url.replace("hinternet.sefaz.ba.gov.br/nfce/consulta", "nfe.sefaz.ba.gov.br/servicos/nfce/qrcode.aspx")
     current_method = method.upper()
     current_data = data
 
@@ -213,6 +215,7 @@ def safe_http_request(
         # Check for HTTP redirects (301, 302, 303, 307, 308)
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("Location")
+            response.close()
             if not location:
                 break
 

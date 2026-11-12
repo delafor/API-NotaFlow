@@ -134,6 +134,22 @@ def extrair_nota(html: str):
     soup = BeautifulSoup(html, "html.parser")
     texto = soup.get_text(" ", strip=True)
 
+    # Fallback para SEFAZ-BA caso o conteúdo da nota esteja embutido no __VIEWSTATE
+    if soup.select_one("#tabResult") is None and "BILHETE DE PASSAGEM" not in texto:
+        vs_input = soup.find("input", {"name": "__VIEWSTATE"})
+        if vs_input and vs_input.get("value"):
+            try:
+                import base64
+                raw_vs = base64.b64decode(vs_input.get("value"))
+                decoded_vs = raw_vs.decode("utf-8", errors="ignore")
+                if "tabResult" in decoded_vs or "txtTopo" in decoded_vs:
+                    start_div = decoded_vs.find("<div")
+                    if start_div != -1:
+                        soup = BeautifulSoup(decoded_vs[start_div:], "html.parser")
+                        texto = soup.get_text(" ", strip=True)
+            except Exception:
+                pass
+
     # BP-e
     if (
         "BILHETE DE PASSAGEM ELETRÔNICO" in texto
