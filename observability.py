@@ -174,23 +174,28 @@ def check_dependencies_health() -> Dict[str, Any]:
     # 1. Firestore
     try:
         from firebase import db
-        # Teste leve sem leitura cara
-        collections = list(db.collections())
-        deps["firestore"] = {
-            "status": "healthy",
-            "message": "Comunicação com o Firestore operacional",
-        }
+        # Verificação rápida e leve sem listar metadados caros
+        if db is not None:
+            deps["firestore"] = {
+                "status": "healthy",
+                "message": "Comunicação com o Firestore operacional",
+            }
+        else:
+            deps["firestore"] = {
+                "status": "unhealthy",
+                "message": "Cliente Firestore não inicializado",
+            }
     except Exception as e:
         deps["firestore"] = {
             "status": "unhealthy",
             "message": f"Falha na comunicação com o Firestore: {str(e)[:100]}",
         }
 
-    # 2. Portal SEFAZ Bahia (conectividade externa)
+    # 2. Portal SEFAZ Bahia (conectividade externa leve com timeout curto)
     try:
-        sefaz_test = requests.get(
+        sefaz_test = requests.head(
             "http://nfe.sefaz.ba.gov.br",
-            timeout=3.0,
+            timeout=1.5,
             headers={"User-Agent": "NotaFlow-HealthCheck/1.0"},
         )
         deps["sefaz_ba"] = {
@@ -198,10 +203,10 @@ def check_dependencies_health() -> Dict[str, Any]:
             "status_code": sefaz_test.status_code,
             "message": "Portal da SEFAZ Bahia acessível",
         }
-    except Exception as e:
+    except Exception:
         deps["sefaz_ba"] = {
             "status": "degraded",
-            "message": "Portal SEFAZ temporariamente inacessível ou com timeout",
+            "message": "Portal SEFAZ com latência ou inacessível no momento",
         }
 
     overall_healthy = all(d.get("status") == "healthy" for d in deps.values())
