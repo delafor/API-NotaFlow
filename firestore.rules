@@ -13,20 +13,37 @@ service cloud.firestore {
 
       // Subcoleção de notas fiscais pertencentes ao usuário
       match /notas/{notaId} {
-        // Leitura (get e list) permitida somente se o usuário autenticado for o dono do documento
         allow read: if request.auth != null && request.auth.uid == userId;
 
-        // Criação e Atualização permitidas somente pelo dono com validação básica de campos
         allow create, update: if request.auth != null 
           && request.auth.uid == userId
           && request.resource.data.keys().hasAll(['linkNota'])
           && request.resource.data.linkNota is string
           && request.resource.data.linkNota.size() <= 2048;
 
-        // Exclusão permitida somente pelo dono
         allow delete: if request.auth != null && request.auth.uid == userId;
       }
     }
+
+    // Base Colaborativa de Preços: gravação e leitura direta pelo cliente bloqueadas;
+    // acesso mediado e validado pela API FastAPI.
+    match /precos_colaborativos/{registroId} {
+      allow read, write: if false;
+    }
+
+    match /catalogo_produtos/{produtoId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /estabelecimentos/{estabelecimentoId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Auditoria interna de contribuições: estritamente restrita ao backend
+    match /auditoria_contribuicoes/{notaHash} {
+      allow read, write: if false;
+    }
   }
 }
-

@@ -2,17 +2,26 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from auth import get_current_user_uid
+from auth import get_current_user_uid, get_current_admin_user
+from collaborative.repository import processar_nota_colaborativa
+from collaborative.router import router as collaborative_router
 from firebase import db
 from extractor import extrair_nota
 from parser import buscar_pagina
 from schemas import NotaFiscalSchema, gerar_id_deterministico_nota
 from security import rate_limiter, validate_url
+from observability import (
+    ObservabilityMiddleware,
+    check_dependencies_health,
+    get_aggregated_metrics,
+    get_recent_api_logs,
+)
 
 # ------------------------------------------------------------
 # LOGGING SETUP
@@ -29,6 +38,9 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.add_middleware(ObservabilityMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 # ------------------------------------------------------------
 # CORS CONFIGURATION
 # ------------------------------------------------------------
@@ -43,9 +55,27 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "HEAD", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+app.include_router(collaborative_router)
+
+
+def _publicar_colaborativo_em_background(uid: str, nota_id: str, nota_validada: dict):
+    """
+    Executa a publicação colaborativa de forma assíncrona e isolada.
+    Caso ocorra qualquer falha no processamento colaborativo, a nota fiscal original
+    já está salva e disponível para o usuário (Regra da Seção 7).
+    """
+    try:
+        processar_nota_colaborativa(
+            uid=uid,
+            nota_id=nota_id,
+            dados_nota_override={"dadosExtraidos": nota_validada},
+        )
+    except Exception as e:
+        logger.warning(f"Processamento colaborativo assíncrono falhou sem impactar nota {nota_id}: {e}")
 
 
 # ------------------------------------------------------------
@@ -117,10 +147,37 @@ def _obter_documento_nota(uid: str, nota_id: str):
 # ENDPOINTS
 # ------------------------------------------------------------
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
-    """Health check endpoint público."""
+    """Endpoint raiz da API."""
     return {"mensagem": "NotaFlow API funcionando!"}
+
+
+@app.get("/health")
+def health_check():
+    """
+    Health check padrão com verificação de dependências em tempo real.
+    """
+    health_data = check_dependencies_health()
+    status_code = status.HTTP_200_OK if health_data["status"] in ("healthy", "degraded") else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=status_code, content=health_data)
+
+
+@app.get("/admin/metrics")
+def admin_metrics(admin: dict = Depends(get_current_admin_user)):
+    """Métricas agregadas da API protegidas por RBAC de Administrador."""
+    return get_aggregated_metrics()
+
+
+@app.get("/admin/logs")
+def admin_logs(
+    limit: int = 50,
+    status_filter: Optional[str] = None,
+    path_filter: Optional[str] = None,
+    admin: dict = Depends(get_current_admin_user),
+):
+    """Logs estruturados sanitizados recentes protegidos por RBAC."""
+    return get_recent_api_logs(limit=limit, status_filter=status_filter, path_filter=path_filter)
 
 
 @app.get("/notas/{nota_id}")
@@ -150,6 +207,7 @@ def buscar_nota(
 def extrair_dados_nota(
     nota_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     uid: str = Depends(get_current_user_uid),
 ):
     """
@@ -204,11 +262,11 @@ def extrair_dados_nota(
         nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
 
         # Transação nativa do Firestore para atualização atômica e consistente
+        from google.cloud.firestore import Transaction, transactional
+
         transaction = db.transaction()
 
-        from google.cloud.firestore import Transaction
-
-        @db.transaction()
+        @transactional
         def _atualizar_transacao(trans: Transaction):
             snapshot = doc_ref.get(transaction=trans)
             if not snapshot.exists:
@@ -224,6 +282,7 @@ def extrair_dados_nota(
             })
 
         _atualizar_transacao(transaction)
+        background_tasks.add_task(_publicar_colaborativo_em_background, uid, nota_id, nota_validada)
 
         return {
             "sucesso": True,
@@ -247,6 +306,7 @@ def extrair_dados_nota(
 def importar_nota(
     data: NotaRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     uid: str = Depends(get_current_user_uid),
 ):
     """
@@ -282,11 +342,11 @@ def importar_nota(
             .document(nota_id)
         )
 
-        from google.cloud.firestore import Transaction
+        from google.cloud.firestore import Transaction, transactional
 
         transaction = db.transaction()
 
-        @db.transaction()
+        @transactional
         def _salvar_transacao(trans: Transaction):
             snapshot = doc_ref.get(transaction=trans)
             if snapshot.exists:
@@ -311,6 +371,7 @@ def importar_nota(
             return dados_salvar, False
 
         doc_dados, ja_existia = _salvar_transacao(transaction)
+        background_tasks.add_task(_publicar_colaborativo_em_background, uid, nota_id, nota_validada)
 
         return {
             "sucesso": True,

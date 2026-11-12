@@ -4,9 +4,112 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# Mapeamento oficial IBGE de código UF (primeiros 2 dígitos da chave de acesso fiscal)
+COD_UF_IBGE = {
+    "11": "RO", "12": "AC", "13": "AM", "14": "RR", "15": "PA", "16": "AP", "17": "TO",
+    "21": "MA", "22": "PI", "23": "CE", "24": "RN", "25": "PB", "26": "PE", "27": "AL",
+    "28": "SE", "29": "BA", "31": "MG", "32": "ES", "33": "RJ", "35": "SP", "41": "PR",
+    "42": "SC", "43": "RS", "50": "MS", "51": "MT", "52": "GO", "53": "DF",
+}
+
+UFS_VALIDAS = set(COD_UF_IBGE.values())
+
 
 def limpar_texto(texto: str) -> str:
     return " ".join(texto.split())
+
+
+def validar_gtin_ean(codigo: str) -> bool:
+    """Valida dígito verificador padrão GS1 (GTIN-8, GTIN-12, GTIN-13, GTIN-14)."""
+    if not codigo or not codigo.isdigit() or len(codigo) not in (8, 12, 13, 14):
+        return False
+    # Códigos iniciados por 2 são de peso variável interno de balança (não são GTIN universal)
+    if codigo.startswith("2") and len(codigo) == 13:
+        return False
+    digitos = [int(d) for d in codigo]
+    check = digitos[-1]
+    corpo = digitos[:-1]
+    soma = 0
+    for idx, d in enumerate(reversed(corpo)):
+        soma += d * (3 if idx % 2 == 0 else 1)
+    calculado = (10 - (soma % 10)) % 10
+    return check == calculado
+
+
+def extrair_gtin_produto(nome: str, codigo: str = None):
+    """Extrai GTIN/EAN confiável do prefixo do nome ou do campo código da nota."""
+    if nome:
+        match_prefix = re.match(r"^\s*(\d{8,14})\s*-\s*", nome)
+        if match_prefix:
+            cand = match_prefix.group(1)
+            if validar_gtin_ean(cand):
+                return cand
+    if codigo:
+        cand_cod = re.sub(r"\D", "", str(codigo))
+        if validar_gtin_ean(cand_cod):
+            return cand_cod
+    return None
+
+
+def extrair_dados_emitente(soup: BeautifulSoup, chave: str = None) -> dict:
+    """
+    Extrai CNPJ, endereço comercial, município, UF e código IBGE do cabeçalho da nota
+    (.txtCenter .text) com fallback determinístico pela chave de acesso de 44 dígitos.
+    """
+    cnpj = None
+    endereco = None
+    municipio = None
+    uf = None
+    codigo_ibge = None
+
+    textos = [limpar_texto(el.get_text(" ", strip=True)) for el in soup.select(".txtCenter .text")]
+
+    for t in textos:
+        if not t:
+            continue
+        # Verifica CNPJ formatado ou numérico
+        match_cnpj = re.search(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", t)
+        if match_cnpj and not cnpj:
+            cnpj_limpo = re.sub(r"\D", "", match_cnpj.group(1))
+            if len(cnpj_limpo) == 14:
+                cnpj = cnpj_limpo
+            continue
+
+        # Se contém vírgulas e não é apenas CNPJ, trata como endereço do emitente
+        if "," in t and not endereco:
+            endereco = t
+            partes = [p.strip() for p in t.split(",") if p.strip()]
+            if len(partes) >= 2:
+                cand_uf = partes[-1].upper().strip()
+                if cand_uf in UFS_VALIDAS:
+                    uf = cand_uf
+                    cand_mun = partes[-2].strip()
+                    # Verifica formato "2927408 - SALVADOR"
+                    match_ibge_mun = re.match(r"^(\d{7})\s*-\s*(.+)$", cand_mun)
+                    if match_ibge_mun:
+                        codigo_ibge = match_ibge_mun.group(1)
+                        municipio = match_ibge_mun.group(2).strip().upper()
+                    else:
+                        municipio = cand_mun.upper()
+
+    # Fallback determinístico via Chave de Acesso de 44 dígitos (posições UF e CNPJ)
+    if chave:
+        chave_limpa = re.sub(r"\D", "", str(chave))
+        if len(chave_limpa) == 44:
+            if not uf:
+                uf = COD_UF_IBGE.get(chave_limpa[:2])
+            if not cnpj:
+                cnpj_chave = chave_limpa[6:20]
+                if len(cnpj_chave) == 14 and cnpj_chave.isdigit():
+                    cnpj = cnpj_chave
+
+    return {
+        "cnpj": cnpj,
+        "endereco": endereco,
+        "municipio": municipio,
+        "uf": uf,
+        "codigo_ibge": codigo_ibge,
+    }
 
 
 def valor_monetario(texto: str):
@@ -281,6 +384,8 @@ def extrair_bpe(soup: BeautifulSoup):
             elemento.get_text()
         ).replace(".", "")
 
+    dados_emitente = extrair_dados_emitente(soup, chave)
+
     # ==========================================================
     # RESULTADO
     # ==========================================================
@@ -288,6 +393,11 @@ def extrair_bpe(soup: BeautifulSoup):
     return {
         "tipo": "BP-e",
         "estabelecimento": estabelecimento,
+        "cnpj": dados_emitente["cnpj"],
+        "endereco": dados_emitente["endereco"],
+        "municipio": dados_emitente["municipio"],
+        "uf": dados_emitente["uf"],
+        "codigo_ibge": dados_emitente["codigo_ibge"],
         "origem": origem,
         "destino": destino,
         "data_hora": data_hora,
@@ -465,11 +575,13 @@ def extrair_nfce(soup: BeautifulSoup):
             unidade = "KG"
 
         preco_kg = valor_unitario if eh_kg else None
+        gtin = extrair_gtin_produto(nome, codigo)
 
         produtos.append(
             {
                 "nome": nome,
                 "codigo": codigo,
+                "gtin": gtin,
                 "quantidade": quantidade,
                 "unidade": unidade,
                 "valor_unitario": valor_unitario,
@@ -537,9 +649,16 @@ def extrair_nfce(soup: BeautifulSoup):
         if match_chave:
             chave = re.sub(r"\D", "", match_chave.group(1))
 
+    dados_emitente = extrair_dados_emitente(soup, chave)
+
     return {
         "tipo": "NFC-e",
         "estabelecimento": estabelecimento,
+        "cnpj": dados_emitente["cnpj"],
+        "endereco": dados_emitente["endereco"],
+        "municipio": dados_emitente["municipio"],
+        "uf": dados_emitente["uf"],
+        "codigo_ibge": dados_emitente["codigo_ibge"],
         "produtos": produtos,
         "total": total,
         "numero": numero,

@@ -9,6 +9,7 @@ from collections import defaultdict
 from typing import List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -16,6 +17,11 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+
+_SHARED_HTTP_SESSION = requests.Session()
+_HTTP_ADAPTER = HTTPAdapter(pool_connections=20, pool_maxsize=40)
+_SHARED_HTTP_SESSION.mount("http://", _HTTP_ADAPTER)
+_SHARED_HTTP_SESSION.mount("https://", _HTTP_ADAPTER)
 
 # Cloud metadata, localhost, and non-routable hostnames
 BLOCKED_HOSTNAMES = {
@@ -183,7 +189,7 @@ def safe_http_request(
     read_timeout = float(os.getenv("HTTP_READ_TIMEOUT", "15.0"))
     timeout = (connect_timeout, read_timeout)
 
-    http_session = session or requests.Session()
+    http_session = session or _SHARED_HTTP_SESSION
     current_url = url
     current_method = method.upper()
     current_data = data
