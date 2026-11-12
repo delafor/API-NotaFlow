@@ -389,5 +389,5 @@ def importar_nota(
         logger.error(f"Erro ao importar nota via URL: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Falha ao importar e processar a nota fiscal.",
+            detail=f"Falha ao importar e processar a nota fiscal: {str(e)}",
         )

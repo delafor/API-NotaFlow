@@ -217,5 +217,6 @@ def check_dependencies_health() -> Dict[str, Any]:
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "uptime_seconds": get_system_uptime_seconds(),
         "dependencies": deps,
+        "recent_logs": list(_LOGS_BUFFER)[-10:],
     }
 
