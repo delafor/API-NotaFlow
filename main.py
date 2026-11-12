@@ -321,16 +321,20 @@ def importar_nota(
     logger.info(f"Importando nota via URL para uid={uid}")
 
     try:
+        nota_validada = None
         if data.html and data.html.strip():
-            logger.info("Utilizando HTML fiscal pré-carregado diretamente pelo cliente")
-            html = data.html
-        else:
-            html = buscar_pagina(url)
-        dados_brutos = extrair_nota(html)
+            try:
+                logger.info("Utilizando HTML fiscal pré-carregado diretamente pelo cliente")
+                dados_brutos = extrair_nota(data.html)
+                nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
+            except Exception as e_client:
+                logger.warning(f"HTML do cliente incompleto ({e_client}); realizando busca pelo servidor.")
+                nota_validada = None
 
-        # Validação estrita de campos, totais e produtos com Pydantic
-        # Se a extração falhar ou tiver campos obrigatórios ausentes, gera exceção e NÃO salva
-        nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
+        if nota_validada is None:
+            html = buscar_pagina(url)
+            dados_brutos = extrair_nota(html)
+            nota_validada = NotaFiscalSchema(**dados_brutos).model_dump()
 
         # Identificador determinístico da nota fiscal (chave fiscal / hash determinístico)
         nota_id = gerar_id_deterministico_nota(nota_validada, url_origem=url)
