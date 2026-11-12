@@ -87,6 +87,11 @@ class NotaRequest(BaseModel):
         description="URL da Nota Fiscal (BP-e / NFC-e) obtida via QR Code ou consulta.",
         max_length=2048,
     )
+    html: Optional[str] = Field(
+        None,
+        description="Conteúdo HTML pré-carregado diretamente pelo dispositivo cliente.",
+        max_length=5 * 1024 * 1024,
+    )
 
     @field_validator("url")
     @classmethod
@@ -316,7 +321,11 @@ def importar_nota(
     logger.info(f"Importando nota via URL para uid={uid}")
 
     try:
-        html = buscar_pagina(url)
+        if data.html and data.html.strip():
+            logger.info("Utilizando HTML fiscal pré-carregado diretamente pelo cliente")
+            html = data.html
+        else:
+            html = buscar_pagina(url)
         dados_brutos = extrair_nota(html)
 
         # Validação estrita de campos, totais e produtos com Pydantic

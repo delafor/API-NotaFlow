@@ -185,8 +185,8 @@ def safe_http_request(
     """
     max_redirects = int(os.getenv("MAX_REDIRECTS", "5"))
     max_content_length = int(os.getenv("MAX_CONTENT_LENGTH", str(5 * 1024 * 1024)))
-    connect_timeout = float(os.getenv("HTTP_CONNECT_TIMEOUT", "5.0"))
-    read_timeout = float(os.getenv("HTTP_READ_TIMEOUT", "15.0"))
+    connect_timeout = float(os.getenv("HTTP_CONNECT_TIMEOUT", "3.0"))
+    read_timeout = float(os.getenv("HTTP_READ_TIMEOUT", "7.0"))
     timeout = (connect_timeout, read_timeout)
 
     http_session = session or _SHARED_HTTP_SESSION
