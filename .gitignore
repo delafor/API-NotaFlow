@@ -1,24 +1,34 @@
-# Environment variables
+# Environment variables & Secrets
 .env
 *.env
+.env.*
+!.env.example
 .env.local
 
-# Firebase credentials and service account files
+# Firebase credentials, private keys and service account files
 firebase-service-account.json
+.firebase-service-account.json
 *-firebase-adminsdk-*.json
 credentials*.json
 service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
 *.json
 !package.json
 !tsconfig.json
 
-# Python bytecode and cache
+# Python bytecode, test and coverage cache
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 .coverage
 htmlcov/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 venv/
@@ -26,11 +36,14 @@ venv/
 env/
 ENV/
 
-# Temporary / Debug files
+# Temporary, database & debug files
 bpe.html
 nota.html
 *.log
 *.tmp
+*.bak
+*.sqlite3
+*.db
 
 # IDE / Editor specific
 .vscode/
@@ -41,7 +54,4 @@ nota.html
 # OS generated files
 .DS_Store
 Thumbs.db
-.env
-venv/
-firebase-service-account.json
-formulario-d5aa9-firebase-adminsdk-fbsvc-b842baef77.json
+Desktop.ini
